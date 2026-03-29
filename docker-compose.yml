@@ -1,0 +1,14 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    init: true
+    ports:
+      - "${APP_PORT:-18421}:18421"
+    environment:
+      TZ: Asia/Shanghai
+      APP_DATA_DIR: /app/data
+    volumes:
+      - ./docker-data:/app/data
+    restart: unless-stopped
