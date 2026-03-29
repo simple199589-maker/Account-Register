@@ -61,8 +61,9 @@ def _load_config():
         "proxy_max_retries_per_request": 30,
         "proxy_bad_ttl_seconds": 180,
         "proxy_retry_attempts_per_account": 20,
-        "otp_wait_timeout_seconds": 420,
+        "otp_wait_timeout_seconds": 150,
         "otp_poll_interval_seconds": 3,
+        "otp_resend_interval_seconds": 30,
         "stable_proxy_file": "stable_proxy.txt",
         "stable_proxy": "",
         "prefer_stable_proxy": True,
@@ -122,6 +123,9 @@ def _load_config():
     config["otp_poll_interval_seconds"] = float(os.environ.get(
         "OTP_POLL_INTERVAL_SECONDS", config["otp_poll_interval_seconds"]
     ))
+    config["otp_resend_interval_seconds"] = float(os.environ.get(
+        "OTP_RESEND_INTERVAL_SECONDS", config["otp_resend_interval_seconds"]
+    ))
     config["stable_proxy_file"] = os.environ.get("STABLE_PROXY_FILE", config["stable_proxy_file"])
     config["stable_proxy"] = os.environ.get("STABLE_PROXY", config["stable_proxy"])
     config["prefer_stable_proxy"] = os.environ.get("PREFER_STABLE_PROXY", config["prefer_stable_proxy"])
@@ -175,8 +179,9 @@ PROXY_VALIDATE_TEST_URL = str(_CONFIG.get("proxy_validate_test_url", "https://au
 PROXY_MAX_RETRIES_PER_REQUEST = max(1, int(_CONFIG.get("proxy_max_retries_per_request", 30)))
 PROXY_BAD_TTL_SECONDS = max(10, int(_CONFIG.get("proxy_bad_ttl_seconds", 180)))
 PROXY_RETRY_ATTEMPTS_PER_ACCOUNT = max(1, int(_CONFIG.get("proxy_retry_attempts_per_account", 20)))
-OTP_WAIT_TIMEOUT_SECONDS = max(60, int(_CONFIG.get("otp_wait_timeout_seconds", 420)))
+OTP_WAIT_TIMEOUT_SECONDS = max(60, int(_CONFIG.get("otp_wait_timeout_seconds", 150)))
 OTP_POLL_INTERVAL_SECONDS = max(1.0, float(_CONFIG.get("otp_poll_interval_seconds", 3)))
+OTP_RESEND_INTERVAL_SECONDS = max(5.0, float(_CONFIG.get("otp_resend_interval_seconds", 30)))
 STABLE_PROXY_FILE = _CONFIG.get("stable_proxy_file", "stable_proxy.txt")
 STABLE_PROXY_RAW = _CONFIG.get("stable_proxy", "")
 PREFER_STABLE_PROXY = _as_bool(_CONFIG.get("prefer_stable_proxy", True))
@@ -1152,6 +1157,7 @@ class ChatGPTRegister:
             impersonate=self.impersonate,
             otp_wait_timeout_seconds=OTP_WAIT_TIMEOUT_SECONDS,
             otp_poll_interval_seconds=OTP_POLL_INTERVAL_SECONDS,
+            otp_resend_interval_seconds=OTP_RESEND_INTERVAL_SECONDS,
         )
 
     def _log(self, step, method, url, status, body=None):
@@ -1226,6 +1232,8 @@ class ChatGPTRegister:
             not_before_ts=not_before_ts,
             exclude_message_ids=exclude_message_ids,
             poll_interval_seconds=OTP_POLL_INTERVAL_SECONDS,
+            on_retry=self.resend_otp,
+            retry_interval_seconds=OTP_RESEND_INTERVAL_SECONDS,
         )
 
     # ==================== 注册流程 ====================
@@ -1302,6 +1310,32 @@ class ChatGPTRegister:
         try: data = r.json()
         except Exception: data = {"final_url": str(r.url), "status": r.status_code}
         self._log("5. Send OTP", "GET", url, r.status_code, data)
+        return r.status_code, data
+
+    def resend_otp(self, attempt: int = 1):
+        """在等待超时阶段补发验证码邮件。AI by zb"""
+
+        url = f"{self.AUTH}/api/accounts/email-otp/resend"
+        headers = {
+            "Accept": "*/*",
+            "Origin": self.AUTH,
+            "Referer": f"{self.AUTH}/email-verification",
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "same-origin",
+        }
+        headers.update(_make_trace_headers())
+        r = self.session.post(
+            url,
+            headers=headers,
+            data=b"",
+            allow_redirects=False,
+        )
+        try:
+            data = r.json()
+        except Exception:
+            data = {"text": (r.text or "")[:500], "status": r.status_code}
+        self._log(f"5.{attempt} Resend OTP", "POST", url, r.status_code, data)
         return r.status_code, data
 
     def validate_otp(self, code: str):
@@ -1583,7 +1617,10 @@ def run_batch(total_accounts: int = 3, output_file="registered_accounts.txt",
         print(f"  代理源: {proxy_info['list_url']}")
         print(f"  优先稳定代理: {'是' if proxy_info['prefer_stable_proxy'] else '否'}")
         print(f"  账号级代理重试: {PROXY_RETRY_ATTEMPTS_PER_ACCOUNT} 次/账号")
-        print(f"  OTP 等待: 最多 {OTP_WAIT_TIMEOUT_SECONDS} 秒 | 轮询间隔: {OTP_POLL_INTERVAL_SECONDS} 秒")
+        print(
+            f"  OTP 等待: 最多 {OTP_WAIT_TIMEOUT_SECONDS} 秒 | "
+            f"轮询间隔: {OTP_POLL_INTERVAL_SECONDS} 秒 | 补发间隔: {OTP_RESEND_INTERVAL_SECONDS} 秒"
+        )
         print(f"  代理校验: {'开启' if proxy_info['validate_enabled'] else '关闭'}")
         if proxy_info["validate_enabled"]:
             print(f"  校验目标: {proxy_info['validate_test_url']}")
@@ -1613,7 +1650,10 @@ def run_batch(total_accounts: int = 3, output_file="registered_accounts.txt",
     else:
         print("  代理: 已关闭，当前以直连模式运行")
     print(f"  OAuth: {'开启' if ENABLE_OAUTH else '关闭'} | required: {'是' if OAUTH_REQUIRED else '否'}")
-    print(f"  OTP 等待: 最多 {OTP_WAIT_TIMEOUT_SECONDS} 秒 | 轮询间隔: {OTP_POLL_INTERVAL_SECONDS} 秒")
+    print(
+        f"  OTP 等待: 最多 {OTP_WAIT_TIMEOUT_SECONDS} 秒 | "
+        f"轮询间隔: {OTP_POLL_INTERVAL_SECONDS} 秒 | 补发间隔: {OTP_RESEND_INTERVAL_SECONDS} 秒"
+    )
     if ENABLE_OAUTH:
         print(f"  OAuth Issuer: {OAUTH_ISSUER}")
         print(f"  OAuth Client: {OAUTH_CLIENT_ID}")

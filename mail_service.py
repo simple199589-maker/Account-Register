@@ -302,12 +302,17 @@ class DuckMailClient:
         not_before_ts: float | None = None,
         exclude_message_ids: set[str] | list[str] | None = None,
         poll_interval_seconds: float = 3.0,
+        on_retry: Callable[[int], None] | None = None,
+        retry_interval_seconds: float = 30.0,
     ) -> str | None:
         """等待并提取 OpenAI 验证码。AI by zb"""
 
         self._log(f"[OTP] 等待验证码邮件 (最多 {timeout}s)...")
         start_time = time.time()
         normalized_poll_interval = max(1.0, float(poll_interval_seconds))
+        normalized_retry_interval = max(normalized_poll_interval, float(retry_interval_seconds))
+        next_retry_elapsed = normalized_retry_interval
+        retry_count = 0
 
         while time.time() - start_time < timeout:
             messages = recent_mail_messages(
@@ -349,6 +354,24 @@ class DuckMailClient:
                         self._log(f"[OTP] 验证码: {code}")
                         return code
 
-            time.sleep(normalized_poll_interval)
+            elapsed = time.time() - start_time
+            while (
+                on_retry is not None
+                and elapsed >= next_retry_elapsed
+                and next_retry_elapsed < float(timeout)
+            ):
+                retry_count += 1
+                self._log(f"[OTP] {int(elapsed)}s 未收到验证码，执行第 {retry_count} 次补发")
+                try:
+                    on_retry(retry_count)
+                except Exception as exc:
+                    self._log(f"[OTP] 第 {retry_count} 次补发失败: {exc}")
+                next_retry_elapsed += normalized_retry_interval
+                elapsed = time.time() - start_time
+
+            remaining = float(timeout) - (time.time() - start_time)
+            if remaining <= 0:
+                break
+            time.sleep(min(normalized_poll_interval, remaining))
 
         return None

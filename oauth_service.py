@@ -290,6 +290,7 @@ class CodexOAuthClient:
         impersonate: str,
         otp_wait_timeout_seconds: int = 120,
         otp_poll_interval_seconds: float = 3.0,
+        otp_resend_interval_seconds: float = 30.0,
     ):
         """初始化 Codex OAuth 客户端。AI by zb"""
 
@@ -304,6 +305,7 @@ class CodexOAuthClient:
         self.impersonate = impersonate
         self.otp_wait_timeout_seconds = max(60, int(otp_wait_timeout_seconds))
         self.otp_poll_interval_seconds = max(1.0, float(otp_poll_interval_seconds))
+        self.otp_resend_interval_seconds = max(5.0, float(otp_resend_interval_seconds))
 
     def _log(self, message: str) -> None:
         """输出 OAuth 日志。AI by zb"""
@@ -323,6 +325,35 @@ class CodexOAuthClient:
         }
         headers.update(self._trace_headers_factory())
         return headers
+
+    def resend_email_otp(self, attempt: int = 1) -> tuple[int, dict[str, Any]]:
+        """在 OAuth 邮箱验证阶段补发验证码。AI by zb"""
+
+        url = f"{self.config.issuer}/api/accounts/email-otp/resend"
+        headers = {
+            "Accept": "*/*",
+            "Origin": self.config.issuer,
+            "Referer": f"{self.config.issuer}/email-verification",
+            "User-Agent": self.user_agent,
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "same-origin",
+        }
+        headers.update(self._trace_headers_factory())
+        resp = self.session.post(
+            url,
+            headers=headers,
+            data=b"",
+            timeout=30,
+            allow_redirects=False,
+            impersonate=self.impersonate,
+        )
+        try:
+            data = resp.json()
+        except Exception:
+            data = {"text": (resp.text or "")[:200], "status": resp.status_code}
+        self._log(f"[OAuth] 第 {attempt} 次补发 -> {resp.status_code}")
+        return resp.status_code, data
 
     def _decode_oauth_session_cookie(self) -> dict[str, Any] | None:
         """解析 OAuth session cookie。AI by zb"""
@@ -813,6 +844,8 @@ class CodexOAuthClient:
             otp_success = False
             otp_deadline = time.time() + self.otp_wait_timeout_seconds
             otp_not_before_ts = time.time()
+            otp_resend_attempt = 0
+            otp_next_resend_elapsed = self.otp_resend_interval_seconds
 
             while time.time() < otp_deadline and not otp_success:
                 messages = recent_mail_messages(
@@ -868,6 +901,18 @@ class CodexOAuthClient:
                 if not candidate_codes:
                     elapsed = int(self.otp_wait_timeout_seconds - max(0, otp_deadline - time.time()))
                     self._log(f"[OAuth] OTP 等待中... ({elapsed}s/{self.otp_wait_timeout_seconds}s)")
+                    current_elapsed = time.time() - otp_not_before_ts
+                    while (
+                        current_elapsed >= otp_next_resend_elapsed
+                        and otp_next_resend_elapsed < self.otp_wait_timeout_seconds
+                    ):
+                        otp_resend_attempt += 1
+                        try:
+                            self.resend_email_otp(otp_resend_attempt)
+                        except Exception as exc:
+                            self._log(f"[OAuth] 第 {otp_resend_attempt} 次补发失败: {exc}")
+                        otp_next_resend_elapsed += self.otp_resend_interval_seconds
+                        current_elapsed = time.time() - otp_not_before_ts
                     time.sleep(self.otp_poll_interval_seconds)
                     continue
 
@@ -905,6 +950,18 @@ class CodexOAuthClient:
                     break
 
                 if not otp_success:
+                    current_elapsed = time.time() - otp_not_before_ts
+                    while (
+                        current_elapsed >= otp_next_resend_elapsed
+                        and otp_next_resend_elapsed < self.otp_wait_timeout_seconds
+                    ):
+                        otp_resend_attempt += 1
+                        try:
+                            self.resend_email_otp(otp_resend_attempt)
+                        except Exception as exc:
+                            self._log(f"[OAuth] 第 {otp_resend_attempt} 次补发失败: {exc}")
+                        otp_next_resend_elapsed += self.otp_resend_interval_seconds
+                        current_elapsed = time.time() - otp_not_before_ts
                     time.sleep(self.otp_poll_interval_seconds)
 
             if not otp_success:
