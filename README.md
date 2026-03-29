@@ -121,6 +121,35 @@ docker compose restart app
 
 更新镜像或重建容器时，不需要重建挂载目录；只要继续挂载同一个 `/app/data`，原来的 `config.json` 和运行数据都会保留。
 
+## 更新说明
+
+如果你使用 `docker run` 运行镜像，更新步骤如下：
+
+```bash
+docker pull ghcr.io/simple199589-maker/account-register:latest
+docker stop account-register
+docker rm account-register
+docker run -d \
+  --name account-register \
+  --restart unless-stopped \
+  -p 18421:18421 \
+  -v /path/to/docker-data:/app/data \
+  ghcr.io/simple199589-maker/account-register:latest
+```
+
+注意：
+
+- 更新时继续使用原来的挂载目录
+- 不要删除挂载目录中的 `config.json`
+- 只要挂载目录不变，原来的运行数据会保留
+
+如果你使用 `docker compose` 本地构建运行，更新步骤如下：
+
+```bash
+git pull
+docker compose up -d --build
+```
+
 ## Python 环境
 
 当前项目按 `pyenv` 使用方式收敛到 Python `3.13.11`：
