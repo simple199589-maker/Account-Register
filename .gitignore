@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+.pytest_cache/
+codex_tokens/
+config.json
+.issues/
+doc/
+uv.lock
+stable_proxy.txt
+registered_accounts.txt
+ak.txt
+rk.txt
