@@ -41,6 +41,15 @@ def _generate_pkce() -> tuple[str, str]:
     return code_verifier, code_challenge
 
 
+def _is_phone_required_url(url: str | None) -> bool:
+    """判断 URL 是否命中手机号验证页面。AI by zb"""
+
+    value = str(url or "").strip().lower()
+    if not value:
+        return False
+    return "/add-phone" in value or "phone-verification" in value
+
+
 class SentinelTokenGenerator:
     """纯 Python 版本 sentinel token 生成器（PoW）。
 
@@ -271,6 +280,19 @@ class CodexOAuthConfig:
     base_url: str
 
 
+class OAuthPhoneRequiredError(RuntimeError):
+    """OAuth 流程命中手机号验证时抛出的终止异常。
+
+    @author AI by zb
+    """
+
+    def __init__(self, url: str):
+        """初始化手机号验证异常。AI by zb"""
+
+        self.url = url
+        super().__init__(f"需手机号验证: {url}")
+
+
 class CodexOAuthClient:
     """Codex OAuth 协议客户端。
 
@@ -311,6 +333,15 @@ class CodexOAuthClient:
         """输出 OAuth 日志。AI by zb"""
 
         self._logger(message)
+
+    def _raise_if_phone_required(self, url: str | None, stage: str) -> None:
+        """检测是否跳转到手机号验证页面，命中则终止流程。AI by zb"""
+
+        normalized_url = str(url or "").strip()
+        if not _is_phone_required_url(normalized_url):
+            return
+        self._log(f"[OAuth] {stage} 命中 add-phone，当前账号需要手机号验证")
+        raise OAuthPhoneRequiredError(normalized_url)
 
     def _oauth_json_headers(self, referer: str) -> dict[str, str]:
         """构造 OAuth JSON 请求头。AI by zb"""
@@ -417,6 +448,7 @@ class CodexOAuthClient:
                 impersonate=self.impersonate,
             )
             final_url = str(resp.url)
+            self._raise_if_phone_required(final_url, "allow_redirect")
             code = _extract_code_from_url(final_url)
             if code:
                 self._log("[OAuth] allow_redirect 命中最终 URL code")
@@ -424,14 +456,18 @@ class CodexOAuthClient:
 
             for item in getattr(resp, "history", []) or []:
                 loc = item.headers.get("Location", "")
+                self._raise_if_phone_required(loc, "allow_redirect history Location")
                 code = _extract_code_from_url(loc)
                 if code:
                     self._log("[OAuth] allow_redirect 命中 history Location code")
                     return code
+                self._raise_if_phone_required(str(item.url), "allow_redirect history URL")
                 code = _extract_code_from_url(str(item.url))
                 if code:
                     self._log("[OAuth] allow_redirect 命中 history URL code")
                     return code
+        except OAuthPhoneRequiredError:
+            raise
         except Exception as exc:
             maybe_localhost = re.search(r'(https?://localhost[^\s\'\"]+)', str(exc))
             if maybe_localhost:
@@ -477,6 +513,7 @@ class CodexOAuthClient:
 
             last_url = str(resp.url)
             self._log(f"[OAuth] follow[{hop + 1}] {resp.status_code} {last_url[:140]}")
+            self._raise_if_phone_required(last_url, f"follow[{hop + 1}]")
             code = _extract_code_from_url(last_url)
             if code:
                 return code, last_url
@@ -487,6 +524,7 @@ class CodexOAuthClient:
                     return None, last_url
                 if loc.startswith("/"):
                     loc = f"{self.config.issuer}{loc}"
+                self._raise_if_phone_required(loc, f"follow[{hop + 1}] redirect")
                 code = _extract_code_from_url(loc)
                 if code:
                     return code, loc
@@ -567,6 +605,7 @@ class CodexOAuthClient:
         orgs = ws_data.get("data", {}).get("orgs", [])
         ws_page = (ws_data.get("page") or {}).get("type", "")
         self._log(f"[OAuth] workspace/select page={ws_page or '-'} next={(ws_next or '-')[:140]}")
+        self._raise_if_phone_required(ws_next, "workspace/select")
 
         org_id = None
         project_id = None
@@ -617,6 +656,7 @@ class CodexOAuthClient:
                 org_next = org_data.get("continue_url", "")
                 org_page = (org_data.get("page") or {}).get("type", "")
                 self._log(f"[OAuth] organization/select page={org_page or '-'} next={(org_next or '-')[:140]}")
+                self._raise_if_phone_required(org_next, "organization/select")
                 if org_next:
                     if org_next.startswith("/"):
                         org_next = f"{self.config.issuer}{org_next}"
@@ -659,6 +699,7 @@ class CodexOAuthClient:
         final_url = str(resp.url)
         redirects = len(getattr(resp, "history", []) or [])
         self._log(f"[OAuth] /oauth/authorize -> {resp.status_code}, final={(final_url or '-')[:140]}, redirects={redirects}")
+        self._raise_if_phone_required(final_url, "/oauth/authorize")
 
         has_login = any(getattr(cookie, "name", "") == "login_session" for cookie in self.session.cookies)
         self._log(f"[OAuth] login_session: {'已获取' if has_login else '未获取'}")
@@ -683,6 +724,9 @@ class CodexOAuthClient:
                 final_url = str(resp2.url)
                 redirects2 = len(getattr(resp2, "history", []) or [])
                 self._log(f"[OAuth] /api/oauth/oauth2/auth -> {resp2.status_code}, final={(final_url or '-')[:140]}, redirects={redirects2}")
+                self._raise_if_phone_required(final_url, "/api/oauth/oauth2/auth")
+            except OAuthPhoneRequiredError:
+                raise
             except Exception as exc:
                 self._log(f"[OAuth] /api/oauth/oauth2/auth 异常: {exc}")
 
@@ -783,6 +827,7 @@ class CodexOAuthClient:
         continue_url = continue_data.get("continue_url", "")
         page_type = (continue_data.get("page") or {}).get("type", "")
         self._log(f"[OAuth] continue page={page_type or '-'} next={(continue_url or '-')[:140]}")
+        self._raise_if_phone_required(continue_url, "authorize/continue")
 
         self._log("[OAuth] 3/7 POST /api/accounts/password/verify")
         sentinel_pwd = build_sentinel_token(
@@ -826,6 +871,7 @@ class CodexOAuthClient:
         continue_url = verify_data.get("continue_url", "") or continue_url
         page_type = (verify_data.get("page") or {}).get("type", "") or page_type
         self._log(f"[OAuth] verify page={page_type or '-'} next={(continue_url or '-')[:140]}")
+        self._raise_if_phone_required(continue_url, "password/verify")
 
         need_oauth_otp = (
             page_type == "email_otp_verification"
@@ -946,6 +992,7 @@ class CodexOAuthClient:
                     continue_url = otp_data.get("continue_url", "") or continue_url
                     page_type = (otp_data.get("page") or {}).get("type", "") or page_type
                     self._log(f"[OAuth] OTP 验证通过 page={page_type or '-'} next={(continue_url or '-')[:140]}")
+                    self._raise_if_phone_required(continue_url, "email-otp/validate")
                     otp_success = True
                     break
 
@@ -972,6 +1019,7 @@ class CodexOAuthClient:
         consent_url = continue_url
         if consent_url and consent_url.startswith("/"):
             consent_url = f"{self.config.issuer}{consent_url}"
+        self._raise_if_phone_required(consent_url, "continue_url")
 
         if not consent_url and "consent" in page_type:
             consent_url = f"{self.config.issuer}/sign-in-with-chatgpt/codex/consent"

@@ -23,7 +23,7 @@ from urllib.parse import parse_qs, urlparse
 
 from curl_cffi import requests as curl_requests
 from mail_service import DuckMailClient, MailApiConfig, mail_message_id_set
-from oauth_service import CodexOAuthClient, CodexOAuthConfig
+from oauth_service import CodexOAuthClient, CodexOAuthConfig, OAuthPhoneRequiredError
 from sub2api_uploader import Sub2ApiConfig, Sub2ApiUploader
 
 # ================= 加载配置 =================
@@ -1574,6 +1574,14 @@ def _register_one(idx, total, proxy, output_file):
                 print(f"\n[OK] [{tag}] {email} 注册成功! 代理: {proxy_label}")
             return True, email, None
 
+        except OAuthPhoneRequiredError as e:
+            last_error = str(e)
+            with _print_lock:
+                print(
+                    f"\n[FAIL] [{idx}] 尝试 {attempt}/{PROXY_RETRY_ATTEMPTS_PER_ACCOUNT} "
+                    f"终止: {last_error} | 代理: {proxy_label}"
+                )
+            return False, None, last_error
         except Exception as e:
             last_error = str(e)
             if current_proxy and pool:
